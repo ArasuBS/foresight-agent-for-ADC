@@ -373,7 +373,7 @@ with st.sidebar:
     debug = st.checkbox("Debug mode (show counts/logs)", value=True)
     run = st.button("Scan")
 
-if run:
+    if run:
     end_date = datetime.utcnow()
     start_date = end_date - relativedelta(months=int(months_back))
 
@@ -425,6 +425,7 @@ if run:
         except Exception as e:
             st.error(f"PubMed error: {e}")
             st.stop()
+
 
         # --- Get summaries (safe chunked fetch) ---
         meta = pm_esummary(ids)
