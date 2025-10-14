@@ -308,8 +308,8 @@ def brief(domain, start_date, end_date, df, sig):
             f"**What to do next**\n- " + "\n- ".join(nexts))
 
 # -------------------------- Streamlit UI ----------------------
-st.set_page_config(page_title="Foresight — ADC Conjugation (Full, No-Sklearn)", layout="wide")
-st.title("Foresight — ADC Conjugation Literature Intelligence (Full, No-Sklearn)")
+st.set_page_config(page_title="Foresight – ADC Literature Intelligence", layout="wide")
+st.title("Foresight — ADC Literature Intelligence")
 st.caption("Method focus · MRI disambiguation · TF-IDF semantic ranking · NumPy K-Means clustering · Source links")
 
 with st.sidebar:
