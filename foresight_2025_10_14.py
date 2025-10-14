@@ -115,8 +115,7 @@ def pm_esummary(ids, chunk=180):
             doi = ""
             for aid in rec.get("articleids", []):
                 if aid.get("idtype") == "doi":
-                    doi = aid.get("value")
-                    break
+                    doi = aid.get("value"); break
             out.append({
                 "PMID": pmid,
                 "Title": rec.get("title", ""),
@@ -332,39 +331,50 @@ if run:
     end_date = datetime.utcnow()
     start_date = end_date - relativedelta(months=int(months_back))
 
-    with st.spinner("Searching PubMed…"):
-        try:
-            ids = pm_esearch(domain, start_date, end_date, retmax=retmax)
-            if debug: st.info(f"PubMed IDs found: {len(ids)}")
-            meta = pm_esummary(ids)
-            # --- Limit Crossref citation lookups to the most-recent N records ---
-            RECENT_FOR_CITES = 250  # tweak as needed (150–300 is a good range)
-            def _parse_year(pd_str):
-            # Extract year from PubDate like '2024 Jan', '2023', etc.
-                import re
-                m = re.search(r'(\d{4})', pd_str or "")
-                return int(m.group(1)) if m else 0
-
-            # Sort summaries by PubDate (desc) and take the newest RECENT_FOR_CITES PMIDs
-            meta_sorted = sorted(meta, key=lambda m: _parse_year(m.get("PubDate","")), reverse=True)
-            recent_pmids_for_cites = set([m["PMID"] for m in meta_sorted[:RECENT_FOR_CITES]])
-
-            pmids = [m["PMID"] for m in meta]
-            abstracts = pm_efetch_abs(pmids)
-        except Exception as e:
-            st.error(f"PubMed error: {e}")
+with st.spinner("Searching PubMed…"):
+    try:
+        ids = pm_esearch(domain, start_date, end_date, retmax=retmax)
+        if debug: st.info(f"PubMed IDs found: {len(ids)}")
+        if not ids:
+            st.warning("No PubMed IDs found for this query/time window.")
             st.stop()
+
+        meta = pm_esummary(ids)  # <- always define meta
+        if debug: st.info(f"Summaries fetched: {len(meta)}")
+        if not meta:
+            st.warning("No summaries returned by PubMed for these IDs.")
+            st.stop()
+
+        # --- Limit Crossref citation lookups to the most-recent N records ---
+        RECENT_FOR_CITES = 250  # adjust 150–350 as you like
+        def _parse_year(pd_str):
+            import re
+            m = re.search(r'(\d{4})', pd_str or "")
+            return int(m.group(1)) if m else 0
+
+        meta_sorted = sorted(meta, key=lambda m: _parse_year(m.get("PubDate","")), reverse=True)
+        recent_pmids_for_cites = set([m["PMID"] for m in meta_sorted[:RECENT_FOR_CITES]])
+
+        # Now fetch abstracts for ALL meta PMIDs
+        pmids = [m["PMID"] for m in meta]
+        abstracts = pm_efetch_abs(pmids)
+
+    except Exception as e:
+        st.error(f"PubMed error: {e}")
+        st.stop()
 
 rows = []
 with st.spinner("Fetching citations & filtering…"):
     for m in meta:
-        title = m.get("Title",""); abs_ = abstracts.get(m["PMID"],"")
-        if not is_bioconj_paper(title, abs_): continue
-        if not any_kw(title+" "+abs_, BIOCONJ_MUST): continue
+        title = m.get("Title","")
+        abs_  = abstracts.get(m["PMID"], "")
+        if not is_bioconj_paper(title, abs_):
+            continue
+        if not any_kw(title + " " + abs_, BIOCONJ_MUST):
+            continue
 
-        # Only query Crossref for the most recent N and when DOI exists
         want_cite = m["PMID"] in recent_pmids_for_cites
-        has_doi = bool(m.get("DOI",""))
+        has_doi   = bool(m.get("DOI",""))
         cites = crossref_cites(m["DOI"]) if (want_cite and has_doi) else None
 
         rows.append({
