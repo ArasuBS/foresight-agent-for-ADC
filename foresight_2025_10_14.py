@@ -354,10 +354,13 @@ with st.spinner("Searching PubMed…"):
         except Exception:
             retmax = 200
 
-        # --- Define start and end date for PubMed search ---
-        today = datetime.today()
-        start_date = (today - timedelta(days=30 * months)).strftime("%Y/%m/%d")
-        end_date = today.strftime("%Y/%m/%d")
+        # Define how far back to search
+        months = 12  # or use your slider value
+
+        today = datetime.utcnow()
+        start_date = today - timedelta(days=30 * months)
+        end_date = today
+
 
         if debug:
             st.info(f"Searching PubMed for '{domain}' between {start_date} and {end_date}")
