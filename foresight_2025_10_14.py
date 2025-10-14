@@ -7,6 +7,31 @@
 import re, string, math, requests, numpy as np, pandas as pd, streamlit as st
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+import time, random
+
+# --- PubMed request helper with retry and API key support ---
+def eutils_request(endpoint, params, max_retries=5):
+    """Handles NCBI E-Utilities calls with retry/backoff and API key."""
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+    headers = {"User-Agent": "Syngene-Foresight/1.0 (contact: research@syngeneintl.com)"}
+
+    # Add your API key automatically from Streamlit Secrets
+    try:
+        api_key = st.secrets.get("NCBI_API_KEY", None)
+    except Exception:
+        api_key = None
+    if api_key:
+        params["api_key"] = api_key
+
+    for attempt in range(max_retries):
+        r = requests.get(f"{base}/{endpoint}", params=params, headers=headers, timeout=30)
+        if r.status_code == 429:  # too many requests
+            time.sleep(min(10, (2 ** attempt)) + random.uniform(0, 0.5))  # polite wait
+            continue
+        r.raise_for_status()
+        return r
+    r.raise_for_status()
+    return r
 
 # --------------------------- Config ---------------------------
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -85,28 +110,35 @@ def is_bioconj_paper(title, abstract):
     return any(k in txt for k in BIOCONJ_MUST)
 
 # --------------------- PubMed / Crossref ---------------------
+
 def pm_esearch(term, start_date, end_date, retmax=200):
-    p={"db":"pubmed","term":term,"retmode":"json","retmax":str(retmax),
-       "sort":"pubdate","datetype":"pdat",
-       "mindate":start_date.strftime("%Y/%m/%d"),
-       "maxdate":end_date.strftime("%Y/%m/%d")}
-    r = requests.get(f"{EUTILS}/esearch.fcgi", params=p, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.json().get("esearchresult",{}).get("idlist",[])
+    """Search PubMed IDs for given term and time window (with retry & API key)."""
+    p = {
+        "db": "pubmed",
+        "term": term,
+        "retmode": "json",
+        "retmax": str(retmax),
+        "sort": "pubdate",
+        "datetype": "pdat",
+        "mindate": start_date.strftime("%Y/%m/%d"),
+        "maxdate": end_date.strftime("%Y/%m/%d"),
+    }
+    r = eutils_request("esearch.fcgi", p)
+    return r.json().get("esearchresult", {}).get("idlist", [])
+
 
 def pm_esummary(ids, chunk=180):
-    """Fetch PubMed summaries in safe chunks to avoid 414 URI too long."""
+    """Fetch PubMed summaries in safe chunks to avoid 414 or 429 errors."""
     if not ids:
         return []
     out = []
     for i in range(0, len(ids), chunk):
-        batch = ids[i:i+chunk]
-        r = requests.get(
-            f"{EUTILS}/esummary.fcgi",
-            params={"db": "pubmed", "id": ",".join(batch), "retmode": "json"},
-            headers=HEADERS, timeout=30
-        )
-        r.raise_for_status()
+        batch = ids[i:i + chunk]
+        r = eutils_request("esummary.fcgi", {
+            "db": "pubmed",
+            "id": ",".join(batch),
+            "retmode": "json"
+        })
         data = r.json().get("result", {})
         for pmid in batch:
             rec = data.get(pmid, {})
@@ -115,7 +147,8 @@ def pm_esummary(ids, chunk=180):
             doi = ""
             for aid in rec.get("articleids", []):
                 if aid.get("idtype") == "doi":
-                    doi = aid.get("value"); break
+                    doi = aid.get("value")
+                    break
             out.append({
                 "PMID": pmid,
                 "Title": rec.get("title", ""),
@@ -126,27 +159,37 @@ def pm_esummary(ids, chunk=180):
                 "PubMedLink": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
                 "DOILink": f"https://doi.org/{doi}" if doi else ""
             })
+        time.sleep(0.3)  # polite pause
     return out
 
+
 def pm_efetch_abs(ids):
-    absd={}
+    """Fetch PubMed abstracts with retry/backoff."""
+    absd = {}
     for pmid in ids:
         try:
-            r = requests.get(f"{EUTILS}/efetch.fcgi",
-                             params={"db":"pubmed","id":pmid,"retmode":"text","rettype":"abstract"},
-                             headers=HEADERS, timeout=30)
-            r.raise_for_status()
+            r = eutils_request("efetch.fcgi", {
+                "db": "pubmed",
+                "id": pmid,
+                "retmode": "text",
+                "rettype": "abstract"
+            })
             absd[pmid] = r.text.strip()
         except Exception:
             absd[pmid] = ""
+        time.sleep(0.2)  # small delay to avoid 429
     return absd
 
+
 def crossref_cites(doi):
-    if not doi: return None
+    """Get citation counts from Crossref."""
+    if not doi:
+        return None
     try:
-        r = requests.get(f"{CROSSREF}/{doi}", headers={"User-Agent":"Syngene-Foresight-Agent/1.0"}, timeout=20)
-        if r.status_code != 200: return None
-        return r.json().get("message",{}).get("is-referenced-by-count")
+        r = requests.get(f"{CROSSREF}/{doi}", headers={"User-Agent": "Syngene-Foresight-Agent/1.0"}, timeout=20)
+        if r.status_code != 200:
+            return None
+        return r.json().get("message", {}).get("is-referenced-by-count")
     except Exception:
         return None
 
