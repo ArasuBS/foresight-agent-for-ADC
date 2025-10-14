@@ -5,7 +5,7 @@
 # extractive summaries, signals, and action brief — all with lightweight deps.
 
 import re, string, math, requests, numpy as np, pandas as pd, streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
 # --------------------------- Config ---------------------------
