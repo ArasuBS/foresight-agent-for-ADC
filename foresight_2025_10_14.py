@@ -269,19 +269,22 @@ def paper_summary(title, abstract):
     return " • ".join(bullets) + tag
 
 def build_signals(df):
-    # Weight abstracts 2x so linker/reagent terms get stronger visibility
+    # Weight abstracts 2× so linker/reagent terms get more visibility
     titles = df["Title"].fillna("")
     abstracts = df["Abstract"].fillna("")
     full = "\n".join((titles + " " + abstracts + " " + abstracts).tolist())
-    def topn(d,k=5): return sorted(d.items(), key=lambda x:x[1], reverse=True)[:k]
+
+    def topn(d, k=5):
+        return sorted(d.items(), key=lambda x: x[1], reverse=True)[:k]
+
     return {
-        "methods":  topn(word_boundary_count(text, METHODS)),
-        "linkers":  topn(word_boundary_count(text, LINKERS)),
-        "reagents": topn(word_boundary_count(text, REAGENTS)),
-        "payloads": topn(word_boundary_count(text, PAYLOADS)),
-        "targets":  topn(word_boundary_count(text, TARGETS)),
-        "clinical": topn(word_boundary_count(text, CLINICAL_TERMS)),
-        "ai":       topn(word_boundary_count(text, AI_TERMS)),
+        "methods":  topn(word_boundary_count(full, METHODS)),
+        "linkers":  topn(word_boundary_count(full, LINKERS)),
+        "reagents": topn(word_boundary_count(full, REAGENTS)),
+        "payloads": topn(word_boundary_count(full, PAYLOADS)),
+        "targets":  topn(word_boundary_count(full, TARGETS)),
+        "clinical": topn(word_boundary_count(full, CLINICAL_TERMS)),
+        "ai":       topn(word_boundary_count(full, AI_TERMS)),
     }
 
 def brief(domain, start_date, end_date, df, sig):
