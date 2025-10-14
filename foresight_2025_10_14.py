@@ -94,30 +94,39 @@ def pm_esearch(term, start_date, end_date, retmax=200):
     r.raise_for_status()
     return r.json().get("esearchresult",{}).get("idlist",[])
 
-def pm_esummary(ids):
-    if not ids: return []
-    r = requests.get(f"{EUTILS}/esummary.fcgi",
-                     params={"db":"pubmed","id":",".join(ids),"retmode":"json"},
-                     headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    data = r.json().get("result",{})
-    out=[]
-    for pmid in ids:
-        rec = data.get(pmid,{})
-        if not rec: continue
-        doi=""
-        for aid in rec.get("articleids",[]):
-            if aid.get("idtype")=="doi": doi=aid.get("value"); break
-        out.append({
-            "PMID": pmid,
-            "Title": rec.get("title",""),
-            "Journal": rec.get("source",""),
-            "PubDate": rec.get("pubdate",""),
-            "Authors": ", ".join([a.get("name","") for a in rec.get("authors",[])][:5]),
-            "DOI": doi,
-            "PubMedLink": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-            "DOILink": f"https://doi.org/{doi}" if doi else ""
-        })
+def pm_esummary(ids, chunk=180):
+    """Fetch PubMed summaries in safe chunks to avoid 414 URI too long."""
+    if not ids:
+        return []
+    out = []
+    for i in range(0, len(ids), chunk):
+        batch = ids[i:i+chunk]
+        r = requests.get(
+            f"{EUTILS}/esummary.fcgi",
+            params={"db": "pubmed", "id": ",".join(batch), "retmode": "json"},
+            headers=HEADERS, timeout=30
+        )
+        r.raise_for_status()
+        data = r.json().get("result", {})
+        for pmid in batch:
+            rec = data.get(pmid, {})
+            if not rec:
+                continue
+            doi = ""
+            for aid in rec.get("articleids", []):
+                if aid.get("idtype") == "doi":
+                    doi = aid.get("value")
+                    break
+            out.append({
+                "PMID": pmid,
+                "Title": rec.get("title", ""),
+                "Journal": rec.get("source", ""),
+                "PubDate": rec.get("pubdate", ""),
+                "Authors": ", ".join([a.get("name", "") for a in rec.get("authors", [])][:5]),
+                "DOI": doi,
+                "PubMedLink": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                "DOILink": f"https://doi.org/{doi}" if doi else ""
+            })
     return out
 
 def pm_efetch_abs(ids):
@@ -328,20 +337,41 @@ if run:
             ids = pm_esearch(domain, start_date, end_date, retmax=retmax)
             if debug: st.info(f"PubMed IDs found: {len(ids)}")
             meta = pm_esummary(ids)
+            # --- Limit Crossref citation lookups to the most-recent N records ---
+            RECENT_FOR_CITES = 250  # tweak as needed (150–300 is a good range)
+            def _parse_year(pd_str):
+            # Extract year from PubDate like '2024 Jan', '2023', etc.
+                import re
+                m = re.search(r'(\d{4})', pd_str or "")
+                return int(m.group(1)) if m else 0
+
+            # Sort summaries by PubDate (desc) and take the newest RECENT_FOR_CITES PMIDs
+            meta_sorted = sorted(meta, key=lambda m: _parse_year(m.get("PubDate","")), reverse=True)
+            recent_pmids_for_cites = set([m["PMID"] for m in meta_sorted[:RECENT_FOR_CITES]])
+
             pmids = [m["PMID"] for m in meta]
             abstracts = pm_efetch_abs(pmids)
         except Exception as e:
             st.error(f"PubMed error: {e}")
             st.stop()
 
-    rows=[]
-    with st.spinner("Fetching citations & filtering…"):
-        for m in meta:
-            title = m.get("Title",""); abs_ = abstracts.get(m["PMID"],"")
-            if not is_bioconj_paper(title, abs_): continue
-            if not any_kw(title+" "+abs_, BIOCONJ_MUST): continue
-            cites = crossref_cites(m.get("DOI","")) if m.get("DOI","") else None
-            rows.append({**m, "Abstract": abs_, "Citations": cites if cites is not None else -1})
+rows = []
+with st.spinner("Fetching citations & filtering…"):
+    for m in meta:
+        title = m.get("Title",""); abs_ = abstracts.get(m["PMID"],"")
+        if not is_bioconj_paper(title, abs_): continue
+        if not any_kw(title+" "+abs_, BIOCONJ_MUST): continue
+
+        # Only query Crossref for the most recent N and when DOI exists
+        want_cite = m["PMID"] in recent_pmids_for_cites
+        has_doi = bool(m.get("DOI",""))
+        cites = crossref_cites(m["DOI"]) if (want_cite and has_doi) else None
+
+        rows.append({
+            **m,
+            "Abstract": abs_,
+            "Citations": cites if (cites is not None) else -1
+        })
 
     if debug: st.info(f"After method/MRI filters: {len(rows)}")
     df = pd.DataFrame(rows)
