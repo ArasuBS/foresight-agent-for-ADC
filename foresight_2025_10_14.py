@@ -430,7 +430,7 @@ if run:
             pmids = [m["PMID"] for m in meta]
             abstracts = pm_efetch_abs(pmids)
 
-        except Exception as e:
+            except Exception as e:
             st.error(f"PubMed error: {e}")
             st.stop()
 
