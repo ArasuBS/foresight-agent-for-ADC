@@ -1,4 +1,4 @@
-# Foresight — ADC Conjugation Literature Intelligence (Full, No-Sklearn)
+# Foresight — ADC Conjugation Literature Intelligence 
 # Date: 2025-10-14
 # Features: PubMed + Crossref, MRI disambiguation, method-only filters,
 # TF-IDF semantic ranking, near-duplicate removal, NumPy K-Means clustering,
