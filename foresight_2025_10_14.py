@@ -303,7 +303,7 @@ st.caption("Method focus · MRI disambiguation · TF-IDF semantic ranking · Num
 
 with st.sidebar:
     st.header("Scan settings")
-   default_query = (
+    default_query = (
     '("antibody-drug conjugate"[TIAB] OR "antibody drug conjugate"[TIAB] OR "Antibody-Drug Conjugates"[MeSH]) '
     'AND (conjugation OR "site-specific" OR "site specific" OR linker OR "val-cit" OR "vc-PABC" OR PABC '
     'OR glucuronide OR "β-glucuronidase" OR hydrazone OR disulfide OR noncleavable OR "non-cleavable" '
