@@ -333,6 +333,11 @@ if run:
 
 with st.spinner("Searching PubMed…"):
     try:
+        # --- Define search window dates based on user selection ---
+        today = datetime.today()
+        start_date = (today - timedelta(days=30 * months)).strftime("%Y/%m/%d")
+        end_date = today.strftime("%Y/%m/%d")
+
         ids = pm_esearch(domain, start_date, end_date, retmax=retmax)
         if debug: st.info(f"PubMed IDs found: {len(ids)}")
         if not ids:
