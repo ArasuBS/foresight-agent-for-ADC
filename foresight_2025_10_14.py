@@ -383,22 +383,14 @@ if run:
             from datetime import datetime, timedelta
 
             # --- Get sidebar values safely ---
-            # Provide default fallbacks in case session_state not set
             months_raw = st.session_state.get("months", 12)
             domain = st.session_state.get("domain", "ADC conjugation methods")
             retmax_raw = st.session_state.get("retmax", 200)
             debug = st.session_state.get("debug", False)
 
-            # Convert sidebar inputs to the right types
-            try:
-                months = int(months_raw)
-            except Exception:
-                months = 12
-
-            try:
-                retmax = int(retmax_raw)
-            except Exception:
-                retmax = 200
+            # Convert sidebar inputs to proper type
+            months = int(months_raw) if str(months_raw).isdigit() else 12
+            retmax = int(retmax_raw) if str(retmax_raw).isdigit() else 200
 
             # Define how far back to search
             today = datetime.utcnow()
@@ -417,7 +409,7 @@ if run:
                 st.warning("No PubMed IDs found for this query/time window.")
                 st.stop()
 
-            # --- Get summaries (safe chunked fetch) ---
+            # --- Get summaries ---
             meta = pm_esummary(ids)
             if debug:
                 st.info(f"Summaries fetched: {len(meta)}")
@@ -426,11 +418,11 @@ if run:
                 st.warning("No summaries returned by PubMed for these IDs.")
                 st.stop()
 
-            # --- Fetch abstracts for all PMIDs ---
+            # --- Fetch abstracts ---
             pmids = [m["PMID"] for m in meta]
             abstracts = pm_efetch_abs(pmids)
 
-            except Exception as e:
+        except Exception as e:
             st.error(f"PubMed error: {e}")
             st.stop()
 
