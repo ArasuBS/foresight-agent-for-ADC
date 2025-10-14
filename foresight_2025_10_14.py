@@ -26,16 +26,24 @@ SCALE_UP_CUES = [
     "cpp","ipc","dar control","tff","hic","single-use","hpapi","containment","hold time"
 ]
 TARGETS  = ["HER2","TROP2","EGFR","CD19","CD22","Nectin-4","BCMA","PSMA","FOLR1","CLDN18.2","MUC1","GPRC5D","CD79b"]
-LINKERS  = ["val-cit","valine-citrulline","vc-pabc","pabc","cathepsin-cleavable","cathepsin","hydrazone",
-            "disulfide linker","non-cleavable linker","self-immolative","glucuronide","beta-glucuronidase",
-            "pegylated linker","hydrophilic linker","maleimide","smcc","click chemistry","spaac","dbco",
-            "azide-alkyne","tetrazine","tco"]
+LINKERS = [
+    "val-cit","valine-citrulline","vc-pabc","pabc","para-aminobenzyl carbamate","self-immolative",
+    "cathepsin-cleavable","cathepsin","glucuronide","beta-glucuronidase","β-glucuronidase",
+    "hydrazone","disulfide","noncleavable","non-cleavable","thioether",
+    "pegylated linker","hydrophilic linker","maleimide","smcc","sulfo-smcc","mcc",
+    "click chemistry","spaac","strain-promoted","dbco","azide-alkyne","tetrazine","tco",
+    "oxime","oxime ligation"
+]
 PAYLOADS = ["MMAE","MMAF","DM1","DM4","SN-38","PBD","duocarmycin","maytansine","auristatin","camptothecin"]
 METHODS  = ["site-specific conjugation","site specific","site-specific","enzymatic conjugation","transglutaminase",
             "sortase","sortase a","glycan engineering","glycoengineering","thiomab","engineered cysteine",
             "cysteine rebridging","aldehyde tag","formylglycine","oxime ligation","bioorthogonal","thioether"]
-REAGENTS = ["smcc","sulfo-smcc","dbco","tco","tetrazine","azide","nhs ester","maleimide","thiol","n3","spaac",
-            "vc-pabc","val-cit","glucuronide"]
+REAGENTS = [
+    "smcc","sulfo-smcc","mcc","dbco","tco","tetrazine","azide","nhs ester","nhs-ester","maleimide",
+    "thiol","sulfhydryl","n3","spaac","iodoacetamide","nem","n-ethylmaleimide","tcep","dtt",
+    "traut's reagent","2-iminothiolane","spdp","lc-smcc","sata","hydroxylamine","imidazole",
+    "phosphate buffer","carbonate buffer","borate buffer","dmsa","dmso","dma","dmf"
+]
 CLINICAL_TERMS = ["phase I","phase II","phase III","randomized","open-label","double-blind"]
 AI_TERMS = ["machine learning","deep learning","transformer","artificial intelligence","AI"]
 
@@ -52,12 +60,22 @@ def any_kw(text, kws):
     return any(k in t for k in kws)
 
 def word_boundary_count(text, vocab):
-    t = (text or "").lower(); out={}
+    txt = (text or "").lower()
+    counts = {}
     for term in vocab:
-        patt = r'\b' + re.escape(term.lower()).replace(r'\-', r'[- ]?') + r'\b'
-        c = len(re.findall(patt, t))
-        if c>0: out[term]=c
-    return out
+        t = term.lower()
+        pattern = (
+            r'(?<![a-z0-9])' +
+            re.escape(t)
+              .replace(r'\-', r'[- ]?')   # match hyphen OR space
+              .replace('beta', r'(beta|β)') +  # beta or β
+            r's?(?![a-z0-9])'             # optional plural
+        )
+        c = len(re.findall(pattern, txt))
+        if c > 0:
+            counts[term] = c
+    return counts
+
 
 def is_bioconj_paper(title, abstract):
     txt = f"{title} {abstract}".lower()
@@ -243,7 +261,10 @@ def paper_summary(title, abstract):
     return " • ".join(bullets) + tag
 
 def build_signals(df):
-    text = "\n".join((df["Title"].fillna("") + " " + df["Abstract"].fillna("")))
+    # Weight abstracts 2x so linker/reagent terms get stronger visibility
+    titles = df["Title"].fillna("")
+    abstracts = df["Abstract"].fillna("")
+    full = "\n".join((titles + " " + abstracts + " " + abstracts).tolist())
     def topn(d,k=5): return sorted(d.items(), key=lambda x:x[1], reverse=True)[:k]
     return {
         "methods":  topn(word_boundary_count(text, METHODS)),
@@ -282,15 +303,14 @@ st.caption("Method focus · MRI disambiguation · TF-IDF semantic ranking · Num
 
 with st.sidebar:
     st.header("Scan settings")
-    default_query = (
-        '("antibody-drug conjugate"[TIAB] OR "antibody drug conjugate"[TIAB] OR "Antibody-Drug Conjugates"[MeSH]) '
-        'AND (conjugation OR "site-specific" OR "site specific" OR "glycan engineering" OR sortase OR transglutaminase '
-        'OR "cysteine rebridging" OR "aldehyde tag" OR "oxime ligation" OR "click chemistry" OR tetrazine OR TCO OR DBCO '
-        'OR maleimide OR SMCC OR "hydrophilic linker" OR "val-cit" OR "vc-PABC" OR glucuronide OR "process development" '
-        'OR scale-up OR manufacturing OR GMP OR CMC OR QbD OR PAT OR "process analytical" OR "process validation" OR TFF '
-        'OR "in-process control" OR "DAR control" OR purification OR HIC OR "hydrophobic interaction chromatography") '
-        'NOT (MRI OR "magnetic resonance" OR diffusion OR "apparent diffusion coefficient" OR DWI OR "ADC map")'
-    )
+   default_query = (
+    '("antibody-drug conjugate"[TIAB] OR "antibody drug conjugate"[TIAB] OR "Antibody-Drug Conjugates"[MeSH]) '
+    'AND (conjugation OR "site-specific" OR "site specific" OR linker OR "val-cit" OR "vc-PABC" OR PABC '
+    'OR glucuronide OR "β-glucuronidase" OR hydrazone OR disulfide OR noncleavable OR "non-cleavable" '
+    'OR maleimide OR SMCC OR "sulfo-SMCC" OR MCC OR "click chemistry" OR SPAAC OR DBCO OR azide OR tetrazine OR TCO '
+    'OR "NHS-ester" OR "NHS ester" OR TCEP OR DTT OR NEM OR iodoacetamide) '
+    'NOT (MRI OR "magnetic resonance" OR diffusion OR "apparent diffusion coefficient" OR DWI OR "ADC map")'
+)
     domain = st.text_input("PubMed query", value=default_query)
     months_back = st.number_input("Time window (months)", 1, 36, 24, 1)
     retmax = st.slider("Max PubMed items to fetch", 50, 800, 400, 50)
