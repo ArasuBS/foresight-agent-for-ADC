@@ -333,34 +333,43 @@ if run:
 
 with st.spinner("Searching PubMed…"):
     try:
-        # --- Define search window dates based on user selection ---
+        # --- Pull variables from sidebar ---
+        months = st.session_state.get("months", 12)
+        retmax = st.session_state.get("retmax", 200)
+        domain = st.session_state.get("domain", "ADC conjugation methods")
+        debug = st.session_state.get("debug", False)
+
+        # --- Define search window (start_date and end_date) ---
+        from datetime import datetime, timedelta
         today = datetime.today()
         start_date = (today - timedelta(days=30 * months)).strftime("%Y/%m/%d")
         end_date = today.strftime("%Y/%m/%d")
 
+        # --- PubMed search ---
         ids = pm_esearch(domain, start_date, end_date, retmax=retmax)
         if debug: st.info(f"PubMed IDs found: {len(ids)}")
         if not ids:
             st.warning("No PubMed IDs found for this query/time window.")
             st.stop()
 
-        meta = pm_esummary(ids)  # <- always define meta
+        # --- Get summaries in safe chunks ---
+        meta = pm_esummary(ids)
         if debug: st.info(f"Summaries fetched: {len(meta)}")
         if not meta:
             st.warning("No summaries returned by PubMed for these IDs.")
             st.stop()
 
-        # --- Limit Crossref citation lookups to the most-recent N records ---
-        RECENT_FOR_CITES = 250  # adjust 150–350 as you like
+        # --- Limit Crossref citation lookups to the most recent N ---
+        RECENT_FOR_CITES = 250
+        import re
         def _parse_year(pd_str):
-            import re
-            m = re.search(r'(\d{4})', pd_str or "")
+            m = re.search(r"(\d{4})", pd_str or "")
             return int(m.group(1)) if m else 0
 
-        meta_sorted = sorted(meta, key=lambda m: _parse_year(m.get("PubDate","")), reverse=True)
+        meta_sorted = sorted(meta, key=lambda m: _parse_year(m.get("PubDate", "")), reverse=True)
         recent_pmids_for_cites = set([m["PMID"] for m in meta_sorted[:RECENT_FOR_CITES]])
 
-        # Now fetch abstracts for ALL meta PMIDs
+        # --- Fetch abstracts for all PMIDs ---
         pmids = [m["PMID"] for m in meta]
         abstracts = pm_efetch_abs(pmids)
 
