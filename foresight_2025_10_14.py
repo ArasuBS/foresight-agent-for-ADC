@@ -385,8 +385,9 @@ if run:
     recent_pmids_for_cites = set([m["PMID"] for m in meta_sorted[:RECENT_FOR_CITES]])
 
     # Phase 2: filter + citations (robust)
-    rows=[]
-    with st.spinner("Fetching citations & filtering…"):
+# Phase 2: filter + citations (robust)
+rows=[]
+with st.spinner("Fetching citations & filtering…"):
     kept = dropped = 0
     for m in meta:
         title = m.get("Title","")
@@ -408,10 +409,21 @@ if run:
         })
     st.info(f"Filter kept {kept} papers, dropped {dropped}.")
 
+df = pd.DataFrame(rows)
 
-    df = pd.DataFrame(rows)
-    if df.empty:
-        st.warning("No method-focused papers after filtering. Try widening timeline or adjusting query."); st.stop()
+if df.empty:
+    st.warning("No method-focused papers after filtering. Showing top recent PubMed results instead.")
+    # Fallback: show 20 most recent from meta so you still get output
+    fallback = pd.DataFrame(meta)
+    # basic date sort (year parse)
+    def _yr(x):
+        m = re.search(r"(\d{4})", x or "")
+        return int(m.group(1)) if m else 0
+    fallback = fallback.sort_values(by="PubDate", key=lambda s: s.map(_yr), ascending=False).head(20).copy()
+    fallback["Abstract"] = [abstracts.get(pmid,"") for pmid in fallback["PMID"]]
+    fallback["Citations"] = -1
+    df = fallback  # proceed with semantic ranking on fallback set
+
 
     # Pre-rank by citations
     df = df.sort_values(by=["Citations","PubDate"], ascending=[False,False]).head(topn_citations)
