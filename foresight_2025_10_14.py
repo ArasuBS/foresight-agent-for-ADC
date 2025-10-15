@@ -365,6 +365,8 @@ st.caption("Method focus · MRI disambiguation · TF-IDF semantic ranking · Num
 
 # Sidebar controls
 with st.sidebar:
+# Sidebar controls
+with st.sidebar:
     st.header("Scan settings")
     default_query = (
         '("antibody-drug conjugate"[TIAB] OR "antibody drug conjugate"[TIAB] OR "Antibody-Drug Conjugates"[MeSH]) '
@@ -380,7 +382,21 @@ with st.sidebar:
     topn_citations = st.slider("Top N by citations (pre-filter)", 10, 150, 60, 5)
     final_k = st.slider("Final N after ranking and filters", 10, 80, 30, 5)
     debug = st.checkbox("Debug mode (show counts and logs)", value=False)
-    run = st.button("Scan")
+
+    # persist run state across reruns
+    if "run" not in st.session_state:
+        st.session_state.run = False
+
+    if st.button("Scan", key="scan_btn"):
+        st.session_state.run = True
+    if st.button("Reset", key="reset_btn"):
+        st.session_state.run = False
+
+# --- Single gate using session_state ---
+if not st.session_state.run:
+    st.info("Set your query and press **Scan** to run.")
+    st.stop()
+
 
 # Single, non-duplicated gate
 if not run:
