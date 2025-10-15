@@ -6,7 +6,7 @@ import os, re, time, random, string, math, requests
 import numpy as np
 import pandas as pd
 import streamlit as st
-from datetime import datetime, timedelta
+from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # --------------------------- Config ---------------------------
@@ -50,9 +50,7 @@ AI_TERMS = ["machine learning","deep learning","transformer","artificial intelli
 
 # --------------------- E-Utils helper (rate-limit safe) -------
 def eutils_request(endpoint, params, max_retries=5, pause_base=0.25):
-    base = EUTILS
     headers = {"User-Agent": UA}
-    # add free NCBI API key if present in secrets
     try:
         api_key = st.secrets.get("NCBI_API_KEY", None)
     except Exception:
@@ -60,20 +58,28 @@ def eutils_request(endpoint, params, max_retries=5, pause_base=0.25):
     if api_key:
         params = {**params, "api_key": api_key}
 
+    last_exc = None
     for attempt in range(max_retries):
-        r = requests.get(f"{base}/{endpoint}", params=params, headers=headers, timeout=30)
-        if r.status_code == 429:
+        try:
+            r = requests.get(f"{EUTILS}/{endpoint}", params=params, headers=headers, timeout=30)
+            if r.status_code == 429:
+                sleep_s = min(10, (2 ** attempt) * pause_base) + random.uniform(0, 0.5)
+                time.sleep(sleep_s)
+                continue
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last_exc = e
             sleep_s = min(10, (2 ** attempt) * pause_base) + random.uniform(0, 0.5)
             time.sleep(sleep_s)
-            continue
-        r.raise_for_status()
-        return r
-    r.raise_for_status()
-    return r
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Unknown E-Utils error")
 
 # ------------------------ Text helpers ------------------------
 def clean_text(s: str) -> str:
-    if not isinstance(s, str): return ""
+    if not isinstance(s, str):
+        return ""
     s = s.lower()
     s = re.sub(r"[\n\r\t]", " ", s)
     s = s.translate(str.maketrans("", "", string.punctuation))
@@ -91,7 +97,7 @@ def word_boundary_count(text, vocab):
         pattern = (
             r'(?<![a-z0-9])' +
             re.escape(t)
-              .replace(r'\-', r'[- ]?')   # hyphen or space
+              .replace(r'\-', r'[- ]?')   # hyphen or space tolerant
               .replace('beta', r'(beta|β)') +
             r's?(?![a-z0-9])'
         )
@@ -110,34 +116,43 @@ def is_bioconj_paper(title, abstract):
 # --------------------- PubMed / Crossref ----------------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def pm_esearch(term, start_dt, end_dt, retmax=200):
-    p={"db":"pubmed","term":term,"retmode":"json","retmax":str(retmax),
-       "sort":"pubdate","datetype":"pdat",
-       "mindate":start_dt.strftime("%Y/%m/%d"),
-       "maxdate":end_dt.strftime("%Y/%m/%d")}
+    p = {
+        "db": "pubmed",
+        "term": term,
+        "retmode": "json",
+        "retmax": str(retmax),
+        "sort": "pubdate",
+        "datetype": "pdat",
+        "mindate": start_dt.strftime("%Y/%m/%d"),
+        "maxdate": end_dt.strftime("%Y/%m/%d"),
+    }
     r = eutils_request("esearch.fcgi", p)
-    return r.json().get("esearchresult",{}).get("idlist",[])
+    return r.json().get("esearchresult", {}).get("idlist", [])
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def pm_esummary(ids, chunk=180, pause=0.25):
-    if not ids: return []
-    out=[]
+    if not ids:
+        return []
+    out = []
     for i in range(0, len(ids), chunk):
         batch = ids[i:i+chunk]
-        r = eutils_request("esummary.fcgi", {"db":"pubmed","id":",".join(batch),"retmode":"json"})
+        r = eutils_request("esummary.fcgi", {"db": "pubmed", "id": ",".join(batch), "retmode": "json"})
         data = r.json().get("result", {})
         for pmid in batch:
             rec = data.get(pmid, {})
-            if not rec: continue
-            doi=""
+            if not rec:
+                continue
+            doi = ""
             for aid in rec.get("articleids", []):
                 if aid.get("idtype") == "doi":
-                    doi = aid.get("value"); break
+                    doi = aid.get("value")
+                    break
             out.append({
                 "PMID": pmid,
-                "Title": rec.get("title",""),
-                "Journal": rec.get("source",""),
-                "PubDate": rec.get("pubdate",""),
-                "Authors": ", ".join([a.get("name","") for a in rec.get("authors", [])][:5]),
+                "Title": rec.get("title", ""),
+                "Journal": rec.get("source", ""),
+                "PubDate": rec.get("pubdate", ""),
+                "Authors": ", ".join([a.get("name", "") for a in rec.get("authors", [])][:5]),
                 "DOI": doi,
                 "PubMedLink": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
                 "DOILink": f"https://doi.org/{doi}" if doi else ""
@@ -147,10 +162,10 @@ def pm_esummary(ids, chunk=180, pause=0.25):
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def pm_efetch_abs(ids, pause=0.15):
-    absd={}
+    absd = {}
     for pmid in ids:
         try:
-            r = eutils_request("efetch.fcgi", {"db":"pubmed","id":pmid,"retmode":"text","rettype":"abstract"})
+            r = eutils_request("efetch.fcgi", {"db": "pubmed", "id": pmid, "retmode": "text", "rettype": "abstract"})
             absd[pmid] = r.text.strip()
         except Exception:
             absd[pmid] = ""
@@ -158,32 +173,35 @@ def pm_efetch_abs(ids, pause=0.15):
     return absd
 
 def crossref_cites(doi):
-    if not doi: return None
+    if not doi:
+        return None
     try:
         r = requests.get(f"{CROSSREF}/{doi}", headers={"User-Agent": UA}, timeout=20)
-        if r.status_code != 200: return None
-        return r.json().get("message",{}).get("is-referenced-by-count")
+        if r.status_code != 200:
+            return None
+        return r.json().get("message", {}).get("is-referenced-by-count")
     except Exception:
         return None
 
 # ------------------ TF-IDF & semantic ranking -----------------
 def build_vocab(texts, max_terms=6000, min_len=3):
-    counts={}
+    counts = {}
     for t in texts:
         for w in clean_text(t).split():
-            if len(w) < min_len: continue
-            counts[w] = counts.get(w,0) + 1
-    vocab = [w for w,_ in sorted(counts.items(), key=lambda x:x[1], reverse=True)[:max_terms]]
-    index = {w:i for i,w in enumerate(vocab)}
+            if len(w) < min_len:
+                continue
+            counts[w] = counts.get(w, 0) + 1
+    vocab = [w for w, _ in sorted(counts.items(), key=lambda x: x[1], reverse=True)[:max_terms]]
+    index = {w: i for i, w in enumerate(vocab)}
     return vocab, index
 
 def tfidf_matrix(texts, index):
     mat = np.zeros((len(texts), len(index)), dtype=np.float32)
-    for i,t in enumerate(texts):
+    for i, t in enumerate(texts):
         for w in clean_text(t).split():
             j = index.get(w)
             if j is not None:
-                mat[i,j] += 1.0
+                mat[i, j] += 1.0
     df = (mat > 0).sum(axis=0)
     idf = np.log((1 + len(texts)) / (1 + df)) + 1.0
     mat = mat * idf
@@ -201,21 +219,26 @@ def embed_query(q, meta):
 def cosine_topk(qv, M, k=None):
     sims = M @ qv
     order = np.argsort(-sims)
-    if k is None: k = len(order)
+    if k is None:
+        k = len(order)
     return order[:k], sims[order[:k]]
 
 # --------------- Near-duplicate removal (titles) --------------
 def dedupe_titles(titles, threshold=0.9):
-    sets=[set(clean_text(t).split()) for t in titles]
-    keep=[]; removed=set()
+    sets = [set(clean_text(t).split()) for t in titles]
+    keep = []
+    removed = set()
     for i in range(len(titles)):
-        if i in removed: continue
+        if i in removed:
+            continue
         keep.append(i)
         Ai = sets[i]
-        for j in range(i+1,len(titles)):
-            if j in removed: continue
+        for j in range(i + 1, len(titles)):
+            if j in removed:
+                continue
             Aj = sets[j]
-            inter = len(Ai & Aj); union = len(Ai | Aj) or 1
+            inter = len(Ai & Aj)
+            union = len(Ai | Aj) or 1
             if inter / union >= threshold:
                 removed.add(j)
     return keep
@@ -231,9 +254,9 @@ def kmeans_numpy(X, k, iters=25, seed=42):
         labels = np.argmin(d, axis=1)
         newC = np.zeros_like(C)
         for i in range(k):
-            pts = X[labels==i]
-            if len(pts)==0:
-                newC[i] = X[rng.integers(0,n)]
+            pts = X[labels == i]
+            if len(pts) == 0:
+                newC[i] = X[rng.integers(0, n)]
             else:
                 v = pts.mean(axis=0)
                 nv = np.linalg.norm(v) + 1e-8
@@ -243,18 +266,19 @@ def kmeans_numpy(X, k, iters=25, seed=42):
         C = newC
     return labels, C
 
-def choose_k(n):  # small, readable clusters
-    return max(2, min(6, int(math.sqrt(max(2, n)/2) + 1)))
+def choose_k(n):
+    return max(2, min(6, int(math.sqrt(max(2, n) / 2) + 1)))
 
 def label_clusters(texts, labels, topn=5):
     vocab, index = build_vocab(texts, max_terms=4000)
     M = tfidf_matrix(texts, index)
-    names=[]
-    inv = {i:w for w,i in index.items()}
-    for c in range(labels.max()+1):
-        idx = np.where(labels==c)[0]
-        if len(idx)==0:
-            names.append(f"Cluster {c+1}"); continue
+    names = []
+    inv = {i: w for w, i in index.items()}
+    for c in range(labels.max() + 1):
+        idx = np.where(labels == c)[0]
+        if len(idx) == 0:
+            names.append(f"Cluster {c+1}")
+            continue
         mean = M[idx].mean(axis=0)
         top_idx = np.argsort(-mean)[:topn]
         names.append(", ".join([inv[i] for i in top_idx]))
@@ -262,24 +286,29 @@ def label_clusters(texts, labels, topn=5):
 
 # -------------------- Summaries / Signals ---------------------
 def best_sentences(text, n=3):
-    if not text: return []
+    if not text:
+        return []
     sents = re.split(r'(?<=[.!?])\s+', text.strip())
-    if len(sents) <= n: return sents
+    if len(sents) <= n:
+        return sents
     cues = METHODS + LINKERS + PAYLOADS + REAGENTS + SCALE_UP_CUES + ["dar","hic","tff","diafiltration","aggregation","stability","efficacy"]
-    scores=[]
+    scores = []
     for s in sents:
-        sl = s.lower(); base=0
+        sl = s.lower()
+        base = 0
         for t in cues:
             patt = r'\b' + re.escape(t.lower()).replace(r'\-', r'[- ]?') + r'\b'
             base += len(re.findall(patt, sl))
-        wlen = len(s.split()); length_bonus = 1.0 if 8 <= wlen <= 40 else 0.6
+        wlen = len(s.split())
+        length_bonus = 1.0 if 8 <= wlen <= 40 else 0.6
         scores.append(base * length_bonus)
     order = np.argsort(-np.array(scores))[:n]
     return [sents[i].strip() for i in order]
 
 def paper_summary(title, abstract):
     bullets = best_sentences(abstract or title, n=3)
-    if not bullets: return "—"
+    if not bullets:
+        return "—"
     novelty = ["novel","first","optimized","hydrophilic linker","vc-pabc","val-cit","tetrazine","tco","dbco","smcc","site-specific","rebridging"]
     tag = " (new/notable)" if any(w in (abstract or "").lower() for w in novelty) else ""
     return " • ".join(bullets) + tag
@@ -302,43 +331,40 @@ def build_signals(df):
 def brief(domain, start_dt, end_dt, df, sig):
     window = f"{start_dt.strftime('%d %b %Y')} - {end_dt.strftime('%d %b %Y')}"
     what = [
-        "Methods: "  + (", ".join([f"{k} ({v})" for k,v in sig["methods"]]) if sig["methods"] else "-"),
-        "Linkers: "  + (", ".join([f"{k} ({v})" for k,v in sig["linkers"]]) if sig["linkers"] else "-"),
-        "Reagents: " + (", ".join([f"{k} ({v})" for k,v in sig["reagents"]]) if sig["reagents"] else "-"),
-        "Payloads: " + (", ".join([f"{k} ({v})" for k,v in sig["payloads"]]) if sig["payloads"] else "-"),
-        "Targets: "  + (", ".join([f"{k} ({v})" for k,v in sig["targets"]]) if sig["targets"] else "-"),
+        "Methods: "  + (", ".join([f"{k} ({v})" for k, v in sig["methods"]]) if sig["methods"] else "-"),
+        "Linkers: "  + (", ".join([f"{k} ({v})" for k, v in sig["linkers"]]) if sig["linkers"] else "-"),
+        "Reagents: " + (", ".join([f"{k} ({v})" for k, v in sig["reagents"]]) if sig["reagents"] else "-"),
+        "Payloads: " + (", ".join([f"{k} ({v})" for k, v in sig["payloads"]]) if sig["payloads"] else "-"),
+        "Targets: "  + (", ".join([f"{k} ({v})" for k, v in sig["targets"]]) if sig["targets"] else "-"),
     ]
-    why = "Enables method scouting for GMP/CMC/QbD: DAR control, HIC/TFF, solvent/linker choices, HPAPI handling."
+    why = "Enables method scouting for GMP/CMC/QbD: DAR control, HIC/TFF, solvent and linker choices, HPAPI handling."
     nexts = [
-        "Define CPPs/IPC around DAR, residuals, aggregation.",
-        "Benchmark HIC→TFF→polish purification for yield/stability.",
-        "Document solvent/linker handling and single-use/HPAPI containment.",
+        "Define CPPs and IPC around DAR, residuals, aggregation.",
+        "Benchmark HIC → TFF → polish purification for yield and stability.",
+        "Document solvent and linker handling, single-use and HPAPI containment.",
     ]
     return (f"**Insight Brief — {domain}**  \n**Window:** {window}  \n**Papers analyzed:** {len(df)}\n\n"
             f"**What is happening**\n- " + "\n- ".join(what) + "\n\n"
             f"**Why it matters**\n{why}\n\n"
             f"**What to do next**\n- " + "\n- ".join(nexts))
+
 def method_focused(title, abstract):
     txt = (title or "") + " " + (abstract or "")
     txt = txt.lower()
-    # must be ADC/bioconjugate AND mention at least one method/linker/reagent
     adc_hit = any(k in txt for k in ["antibody-drug conjugate","antibody drug conjugate","bioconjugate","adc "])
     tech_hit = any_kw(txt, METHODS + LINKERS + REAGENTS)
-    # exclude MRI unless clearly ADC
     imaging = any(b in txt for b in IMAGING_BAD)
     if imaging and not adc_hit:
         return False
     return adc_hit and tech_hit
+
 # -------------------------- Streamlit UI ----------------------
 st.set_page_config(page_title="Foresight – ADC Literature Intelligence", layout="wide")
 st.title("Foresight — ADC Literature Intelligence")
 st.caption("Method focus · MRI disambiguation · TF-IDF semantic ranking · NumPy K-Means · Source links")
 
+# Sidebar controls
 with st.sidebar:
-    # If user hasn't clicked Scan, don't run the pipeline
-if not run:
-    st.info("Set your query and press **Scan** to run.")
-    st.stop()
     st.header("Scan settings")
     default_query = (
         '("antibody-drug conjugate"[TIAB] OR "antibody drug conjugate"[TIAB] OR "Antibody-Drug Conjugates"[MeSH]) '
@@ -352,83 +378,77 @@ if not run:
     months_back = st.number_input("Time window (months)", 1, 36, 24, 1)
     retmax = st.slider("Max PubMed items", 50, 800, 400, 50)
     topn_citations = st.slider("Top N by citations (pre-filter)", 10, 150, 60, 5)
-    final_k = st.slider("Final N after ranking & filters", 10, 80, 30, 5)
-    debug = st.checkbox("Debug mode (show counts/logs)", value=False)
+    final_k = st.slider("Final N after ranking and filters", 10, 80, 30, 5)
+    debug = st.checkbox("Debug mode (show counts and logs)", value=False)
     run = st.button("Scan")
+
+# Single, non-duplicated gate
 if not run:
     st.info("Set your query and press **Scan** to run.")
     st.stop()
 
-if run:
-    # Build date window
-    end_dt = datetime.utcnow()
-    start_dt = end_dt - relativedelta(months=int(months_back))
+# -------------------------- Pipeline starts here --------------------------
+# Build date window
+end_dt = datetime.utcnow()
+start_dt = end_dt - relativedelta(months=int(months_back))
 
-    # Phase 1: PubMed
-    with st.spinner("Searching PubMed…"):
-        try:
-            ids = pm_esearch(query, start_dt, end_dt, retmax=retmax)
-            if not ids:
-                st.warning("No PubMed IDs found. Adjust query or widen timeline.")
-                st.stop()
-
-            meta = pm_esummary(ids)
-            if not meta:
-                st.warning("No summaries returned by PubMed.")
-                st.stop()
-
-            pmids = [m["PMID"] for m in meta]
-            abstracts = pm_efetch_abs(pmids)
-
-        except Exception as e:
-            st.error(f"PubMed error: {e}")
+# Phase 1: PubMed fetch
+with st.spinner("Searching PubMed…"):
+    try:
+        ids = pm_esearch(query, start_dt, end_dt, retmax=retmax)
+        if not ids:
+            st.warning("No PubMed IDs found. Adjust query or widen timeline.")
             st.stop()
 
-    # (still inside if run:)
-    # RECENT_FOR_CITES, recent_pmids_for_cites = ...
-    # Phase 2: filtering & citations (loop: for m in meta)
-    # Build df, semantic ranking, clustering
-    # Signals + brief + summaries
-    # Download buttons
+        meta = pm_esummary(ids)
+        if not meta:
+            st.warning("No summaries returned by PubMed.")
+            st.stop()
 
+        pmids = [m["PMID"] for m in meta]
+        abstracts = pm_efetch_abs(pmids)
 
-    # Limit Crossref lookups to newest N
-    RECENT_FOR_CITES = 250
-    def _parse_year(pd_str):
-        m = re.search(r"(\d{4})", pd_str or "")
-        return int(m.group(1)) if m else 0
-    meta_sorted = sorted(meta, key=lambda m: _parse_year(m.get("PubDate","")), reverse=True)
-    recent_pmids_for_cites = set([m["PMID"] for m in meta_sorted[:RECENT_FOR_CITES]])
+        if debug:
+            st.write(f"Fetched {len(ids)} PMIDs. Summaries: {len(meta)}. Abstracts: {len(abstracts)}.")
 
-    # Phase 2: filter + citations (robust)
-# Phase 2: filter + citations (robust)
-rows=[]
-with st.spinner("Fetching citations & filtering…"):
+    except Exception as e:
+        st.error(f"PubMed error: {e}")
+        st.stop()
+
+# Limit Crossref lookups to newest N
+RECENT_FOR_CITES = 250
+def _parse_year(pd_str):
+    m = re.search(r"(\d{4})", pd_str or "")
+    return int(m.group(1)) if m else 0
+meta_sorted = sorted(meta, key=lambda m: _parse_year(m.get("PubDate", "")), reverse=True)
+recent_pmids_for_cites = set([m["PMID"] for m in meta_sorted[:RECENT_FOR_CITES]])
+
+# Phase 2: Filter + citations
+rows = []
+with st.spinner("Fetching citations and filtering…"):
     kept = dropped = 0
     for m in meta:
-        title = m.get("Title","")
+        title = m.get("Title", "")
         abs_  = abstracts.get(m["PMID"], "")
-
         if not method_focused(title, abs_):
             dropped += 1
             continue
-
         kept += 1
         want_cite = m["PMID"] in recent_pmids_for_cites
-        has_doi   = bool(m.get("DOI",""))
+        has_doi   = bool(m.get("DOI", ""))
         cites = crossref_cites(m["DOI"]) if (want_cite and has_doi) else None
-
         rows.append({
             **m,
             "Abstract": abs_,
             "Citations": cites if (cites is not None) else -1
         })
     st.info(f"Filter kept {kept} papers, dropped {dropped}.")
+    if debug:
+        st.write("Sample kept record:", rows[0] if rows else "None")
 
-# --- Build DataFrame and show a checkpoint table ---
+# Build DataFrame and checkpoint view
 try:
     df = pd.DataFrame(rows)
-
     if df.empty:
         st.warning("No method-focused papers after filtering. Showing top recent PubMed results instead.")
         fallback = pd.DataFrame(meta)
@@ -436,23 +456,24 @@ try:
             m = re.search(r"(\d{4})", x or "")
             return int(m.group(1)) if m else 0
         fallback = fallback.sort_values(by="PubDate", key=lambda s: s.map(_yr), ascending=False).head(20).copy()
-        fallback["Abstract"] = [abstracts.get(pmid,"") for pmid in fallback["PMID"]]
+        fallback["Abstract"] = [abstracts.get(pmid, "") for pmid in fallback["PMID"]]
         fallback["Citations"] = -1
         df = fallback
 
     st.subheader("Checkpoint: Filtered set (first 20)")
-    st.dataframe(df.head(20)[["Title","Journal","PubDate","Authors","Citations","PMID","DOI","PubMedLink"]],
-                 use_container_width=True)
+    st.dataframe(
+        df.head(20)[["Title","Journal","PubDate","Authors","Citations","PMID","DOI","PubMedLink"]],
+        use_container_width=True
+    )
 
-    # --- Pre-rank by citations ---
+    # Pre-rank by citations
     df = df.sort_values(by=["Citations","PubDate"], ascending=[False, False]).head(topn_citations)
 
-    # --- Semantic ranking seed ---
+    # Semantic ranking
     seed = ("ADC conjugation method development; site-specific; linkers; payload; DAR control; HIC; TFF; GMP; "
             "CMC; QbD; PAT; scale-up manufacturing; solvent handling; HPAPI containment")
     texts = (df["Title"].fillna("") + ". " + df["Abstract"].fillna("")).tolist()
 
-    # Safety: if all texts are empty, bail gracefully
     if not any(t.strip() for t in texts):
         st.warning("No usable text for semantic ranking. Showing citation-ranked results only.")
         df_sem = df.copy()
@@ -464,21 +485,22 @@ try:
         df_sem["SemanticScore"] = sims
 
         # Deduplicate by title
-        keep = dedupe_titles(df_sem["Title"].fillna("").tolist(), threshold=0.88)
-        df_sem = df_sem.iloc[keep].head(final_k).reset_index(drop=True)
+        keep_idx = dedupe_titles(df_sem["Title"].fillna("").tolist(), threshold=0.88)
+        df_sem = df_sem.iloc[keep_idx].head(final_k).reset_index(drop=True)
 
-    # --- Selected papers table ---
+    # Selected papers table
     st.subheader("Selected papers (semantically ranked)")
     cols_show = ["Title","Journal","PubDate","Authors","Citations","PMID","DOI","PubMedLink"]
     if "SemanticScore" in df_sem.columns:
         cols_show.insert(5, "SemanticScore")
     st.dataframe(df_sem[cols_show], use_container_width=True)
 
-    # --- Themes (clusters) ---
+    # Themes (clusters)
     st.subheader("Themes (clusters)")
     try:
         if "SemanticScore" in df_sem.columns and len(df_sem) >= 2 and any(t.strip() for t in texts):
-            X = M[order][keep][:len(df_sem)]
+            # Build X aligned to df_sem order
+            X = M[order][keep_idx][:len(df_sem)]
             k = choose_k(len(df_sem))
             labels, _ = kmeans_numpy(X, k=k, iters=30, seed=42)
             df_sem["ThemeID"] = labels
@@ -492,52 +514,77 @@ try:
     except Exception as e:
         st.warning(f"Clustering skipped: {e}")
 
-    # --- Signals & Brief ---
+    # Signals and brief
     st.subheader("Signals snapshot")
     try:
         sig = build_signals(df_sem)
-        def dictdf(name,pairs): return pd.DataFrame(pairs, columns=[name,"count"]) if pairs else pd.DataFrame(columns=[name,"count"])
-        c1,c2,c3 = st.columns(3)
-        with c1: st.markdown("**Methods**");  st.dataframe(dictdf("method", sig["methods"]), use_container_width=True, height=220)
-        with c2: st.markdown("**Linkers**");  st.dataframe(dictdf("linker", sig["linkers"]), use_container_width=True, height=220)
-        with c3: st.markdown("**Reagents**"); st.dataframe(dictdf("reagent", sig["reagents"]), use_container_width=True, height=220)
-        c4,c5,c6 = st.columns(3)
-        with c4: st.markdown("**Payloads**"); st.dataframe(dictdf("payload", sig["payloads"]), use_container_width=True, height=220)
-        with c5: st.markdown("**Targets**");  st.dataframe(dictdf("target", sig["targets"]), use_container_width=True, height=220)
-        with c6: st.markdown("**Clinical**"); st.dataframe(dictdf("clinical", sig["clinical"]), use_container_width=True, height=220)
+        def dictdf(name, pairs):
+            return pd.DataFrame(pairs, columns=[name, "count"]) if pairs else pd.DataFrame(columns=[name, "count"])
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**Methods**")
+            st.dataframe(dictdf("method", sig["methods"]), use_container_width=True, height=220)
+        with c2:
+            st.markdown("**Linkers**")
+            st.dataframe(dictdf("linker", sig["linkers"]), use_container_width=True, height=220)
+        with c3:
+            st.markdown("**Reagents**")
+            st.dataframe(dictdf("reagent", sig["reagents"]), use_container_width=True, height=220)
+
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            st.markdown("**Payloads**")
+            st.dataframe(dictdf("payload", sig["payloads"]), use_container_width=True, height=220)
+        with c5:
+            st.markdown("**Targets**")
+            st.dataframe(dictdf("target", sig["targets"]), use_container_width=True, height=220)
+        with c6:
+            st.markdown("**Clinical**")
+            st.dataframe(dictdf("clinical", sig["clinical"]), use_container_width=True, height=220)
 
         st.subheader("Insight Brief")
-        # Use your already-defined start_dt/end_dt (the ones you set before running PubMed)
-        st.markdown(brief("ADC conjugation method development & scale-up", start_dt, end_dt, df_sem, sig))
+        st.markdown(brief("ADC conjugation method development and scale-up", start_dt, end_dt, df_sem, sig))
     except Exception as e:
-        st.warning(f"Signals/brief skipped: {e}")
+        st.warning(f"Signals or brief skipped: {e}")
 
-    # --- Summaries ---
+    # Summaries and downloads
     st.subheader("Paper summaries (extractive)")
     try:
-        sums=[]
-        for _,r in df_sem.iterrows():
+        sums = []
+        for _, r in df_sem.iterrows():
             sums.append({
-                "Theme": r.get("Theme",""),
+                "Theme": r.get("Theme", ""),
                 "Title": r["Title"],
-                "Summary (problem · method · result / novelty)": paper_summary(r["Title"], r.get("Abstract","")),
-                "Citations": r.get("Citations",""),
-                "Journal": r.get("Journal",""),
-                "PubDate": r.get("PubDate",""),
-                "PubMedLink": r.get("PubMedLink",""),
-                "DOILink": r.get("DOILink","")
+                "Summary (problem · method · result / novelty)": paper_summary(r["Title"], r.get("Abstract", "")),
+                "Citations": r.get("Citations", ""),
+                "Journal": r.get("Journal", ""),
+                "PubDate": r.get("PubDate", ""),
+                "PubMedLink": r.get("PubMedLink", ""),
+                "DOILink": r.get("DOILink", "")
             })
         df_sum = pd.DataFrame(sums)
-        st.dataframe(df_sum[["Theme","Title","Summary (problem · method · result / novelty)","Citations","Journal","PubDate","PubMedLink","DOILink"]],
-                     use_container_width=True, height=500)
+        st.dataframe(
+            df_sum[["Theme","Title","Summary (problem · method · result / novelty)","Citations","Journal","PubDate","PubMedLink","DOILink"]],
+            use_container_width=True,
+            height=500
+        )
 
         st.subheader("Download")
-        st.download_button("Download Selected (CSV)", df_sem.to_csv(index=False).encode("utf-8"),
-                           file_name="selected_papers.csv", mime="text/csv")
-        st.download_button("Download Summaries (CSV)", df_sum.to_csv(index=False).encode("utf-8"),
-                           file_name="paper_summaries.csv", mime="text/csv")
+        st.download_button(
+            "Download Selected (CSV)",
+            df_sem.to_csv(index=False).encode("utf-8"),
+            file_name="selected_papers.csv",
+            mime="text/csv"
+        )
+        st.download_button(
+            "Download Summaries (CSV)",
+            df_sum.to_csv(index=False).encode("utf-8"),
+            file_name="paper_summaries.csv",
+            mime="text/csv"
+        )
     except Exception as e:
-        st.warning(f"Summaries/download skipped: {e}")
+        st.warning(f"Summaries or download skipped: {e}")
 
 except Exception as e:
     st.error(f"Post-filter pipeline error: {e}")
