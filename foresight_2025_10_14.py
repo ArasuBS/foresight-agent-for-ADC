@@ -365,8 +365,6 @@ st.caption("Method focus · MRI disambiguation · TF-IDF semantic ranking · Num
 
 # Sidebar controls
 with st.sidebar:
-# Sidebar controls
-with st.sidebar:
     st.header("Scan settings")
     default_query = (
         '("antibody-drug conjugate"[TIAB] OR "antibody drug conjugate"[TIAB] OR "Antibody-Drug Conjugates"[MeSH]) '
