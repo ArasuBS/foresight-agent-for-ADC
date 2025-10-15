@@ -335,6 +335,10 @@ st.title("Foresight — ADC Literature Intelligence")
 st.caption("Method focus · MRI disambiguation · TF-IDF semantic ranking · NumPy K-Means · Source links")
 
 with st.sidebar:
+    # If user hasn't clicked Scan, don't run the pipeline
+if not run:
+    st.info("Set your query and press **Scan** to run.")
+    st.stop()
     st.header("Scan settings")
     default_query = (
         '("antibody-drug conjugate"[TIAB] OR "antibody drug conjugate"[TIAB] OR "Antibody-Drug Conjugates"[MeSH]) '
@@ -421,101 +425,122 @@ with st.spinner("Fetching citations & filtering…"):
         })
     st.info(f"Filter kept {kept} papers, dropped {dropped}.")
 
-df = pd.DataFrame(rows)
+# --- Build DataFrame and show a checkpoint table ---
+try:
+    df = pd.DataFrame(rows)
 
-if df.empty:
-    st.warning("No method-focused papers after filtering. Showing top recent PubMed results instead.")
-    # Fallback: show 20 most recent from meta so you still get output
-    fallback = pd.DataFrame(meta)
-    # basic date sort (year parse)
-    def _yr(x):
-        m = re.search(r"(\d{4})", x or "")
-        return int(m.group(1)) if m else 0
-    fallback = fallback.sort_values(by="PubDate", key=lambda s: s.map(_yr), ascending=False).head(20).copy()
-    fallback["Abstract"] = [abstracts.get(pmid,"") for pmid in fallback["PMID"]]
-    fallback["Citations"] = -1
-    df = fallback  # proceed with semantic ranking on fallback set
+    if df.empty:
+        st.warning("No method-focused papers after filtering. Showing top recent PubMed results instead.")
+        fallback = pd.DataFrame(meta)
+        def _yr(x):
+            m = re.search(r"(\d{4})", x or "")
+            return int(m.group(1)) if m else 0
+        fallback = fallback.sort_values(by="PubDate", key=lambda s: s.map(_yr), ascending=False).head(20).copy()
+        fallback["Abstract"] = [abstracts.get(pmid,"") for pmid in fallback["PMID"]]
+        fallback["Citations"] = -1
+        df = fallback
 
+    st.subheader("Checkpoint: Filtered set (first 20)")
+    st.dataframe(df.head(20)[["Title","Journal","PubDate","Authors","Citations","PMID","DOI","PubMedLink"]],
+                 use_container_width=True)
 
-    # Pre-rank by citations
-    df = df.sort_values(by=["Citations","PubDate"], ascending=[False,False]).head(topn_citations)
+    # --- Pre-rank by citations ---
+    df = df.sort_values(by=["Citations","PubDate"], ascending=[False, False]).head(topn_citations)
 
-    # Phase 3: Semantic ranking
+    # --- Semantic ranking seed ---
     seed = ("ADC conjugation method development; site-specific; linkers; payload; DAR control; HIC; TFF; GMP; "
             "CMC; QbD; PAT; scale-up manufacturing; solvent handling; HPAPI containment")
     texts = (df["Title"].fillna("") + ". " + df["Abstract"].fillna("")).tolist()
-    M, meta_embed = embed_texts(texts)
-    qv = embed_query(seed, meta_embed)
-    order, sims = cosine_topk(qv, M, k=len(df))
-    df_sem = df.iloc[order].copy()
-    df_sem["SemanticScore"] = sims
 
-    # Deduplicate by title
-    keep = dedupe_titles(df_sem["Title"].fillna("").tolist(), threshold=0.88)
-    df_sem = df_sem.iloc[keep].head(final_k).reset_index(drop=True)
-
-    # Display selected
-    st.subheader("Selected papers (semantically ranked)")
-    st.dataframe(
-        df_sem[["Title","Journal","PubDate","Authors","Citations","SemanticScore","PMID","DOI","PubMedLink","DOILink"]],
-        use_container_width=True
-    )
-
-    # Phase 4: Themes
-    st.subheader("Themes (clusters)")
-    if len(df_sem) >= 2:
-        X = M[order][keep][:len(df_sem)]
-        k = choose_k(len(df_sem))
-        labels, _ = kmeans_numpy(X, k=k, iters=30, seed=42)
-        df_sem["ThemeID"] = labels
-        theme_names = label_clusters((df_sem["Title"] + ". " + df_sem["Abstract"]).fillna("").tolist(), labels, topn=5)
-        df_sem["Theme"] = [theme_names[i] for i in labels]
-        st.write("Detected themes:", ", ".join(sorted(set(df_sem["Theme"]))))
+    # Safety: if all texts are empty, bail gracefully
+    if not any(t.strip() for t in texts):
+        st.warning("No usable text for semantic ranking. Showing citation-ranked results only.")
+        df_sem = df.copy()
     else:
-        df_sem["ThemeID"] = 0
-        df_sem["Theme"] = "All"
-        st.write("Detected themes: All")
+        M, meta_embed = embed_texts(texts)
+        qv = embed_query(seed, meta_embed)
+        order, sims = cosine_topk(qv, M, k=len(df))
+        df_sem = df.iloc[order].copy()
+        df_sem["SemanticScore"] = sims
 
-    # Phase 5: Signals + brief
+        # Deduplicate by title
+        keep = dedupe_titles(df_sem["Title"].fillna("").tolist(), threshold=0.88)
+        df_sem = df_sem.iloc[keep].head(final_k).reset_index(drop=True)
+
+    # --- Selected papers table ---
+    st.subheader("Selected papers (semantically ranked)")
+    cols_show = ["Title","Journal","PubDate","Authors","Citations","PMID","DOI","PubMedLink"]
+    if "SemanticScore" in df_sem.columns:
+        cols_show.insert(5, "SemanticScore")
+    st.dataframe(df_sem[cols_show], use_container_width=True)
+
+    # --- Themes (clusters) ---
+    st.subheader("Themes (clusters)")
+    try:
+        if "SemanticScore" in df_sem.columns and len(df_sem) >= 2 and any(t.strip() for t in texts):
+            X = M[order][keep][:len(df_sem)]
+            k = choose_k(len(df_sem))
+            labels, _ = kmeans_numpy(X, k=k, iters=30, seed=42)
+            df_sem["ThemeID"] = labels
+            theme_names = label_clusters((df_sem["Title"] + ". " + df_sem["Abstract"]).fillna("").tolist(), labels, topn=5)
+            df_sem["Theme"] = [theme_names[i] for i in labels]
+            st.write("Detected themes:", ", ".join(sorted(set(df_sem.get("Theme", [])))))
+        else:
+            df_sem["ThemeID"] = 0
+            df_sem["Theme"] = "All"
+            st.write("Detected themes: All")
+    except Exception as e:
+        st.warning(f"Clustering skipped: {e}")
+
+    # --- Signals & Brief ---
     st.subheader("Signals snapshot")
-    sig = build_signals(df_sem)
-    def dictdf(name,pairs): return pd.DataFrame(pairs, columns=[name,"count"]) if pairs else pd.DataFrame(columns=[name,"count"])
-    c1,c2,c3 = st.columns(3)
-    with c1: st.markdown("**Methods**");  st.dataframe(dictdf("method", sig["methods"]), use_container_width=True, height=220)
-    with c2: st.markdown("**Linkers**");  st.dataframe(dictdf("linker", sig["linkers"]), use_container_width=True, height=220)
-    with c3: st.markdown("**Reagents**"); st.dataframe(dictdf("reagent", sig["reagents"]), use_container_width=True, height=220)
-    c4,c5,c6 = st.columns(3)
-    with c4: st.markdown("**Payloads**"); st.dataframe(dictdf("payload", sig["payloads"]), use_container_width=True, height=220)
-    with c5: st.markdown("**Targets**");  st.dataframe(dictdf("target", sig["targets"]), use_container_width=True, height=220)
-    with c6: st.markdown("**Clinical**"); st.dataframe(dictdf("clinical", sig["clinical"]), use_container_width=True, height=220)
+    try:
+        sig = build_signals(df_sem)
+        def dictdf(name,pairs): return pd.DataFrame(pairs, columns=[name,"count"]) if pairs else pd.DataFrame(columns=[name,"count"])
+        c1,c2,c3 = st.columns(3)
+        with c1: st.markdown("**Methods**");  st.dataframe(dictdf("method", sig["methods"]), use_container_width=True, height=220)
+        with c2: st.markdown("**Linkers**");  st.dataframe(dictdf("linker", sig["linkers"]), use_container_width=True, height=220)
+        with c3: st.markdown("**Reagents**"); st.dataframe(dictdf("reagent", sig["reagents"]), use_container_width=True, height=220)
+        c4,c5,c6 = st.columns(3)
+        with c4: st.markdown("**Payloads**"); st.dataframe(dictdf("payload", sig["payloads"]), use_container_width=True, height=220)
+        with c5: st.markdown("**Targets**");  st.dataframe(dictdf("target", sig["targets"]), use_container_width=True, height=220)
+        with c6: st.markdown("**Clinical**"); st.dataframe(dictdf("clinical", sig["clinical"]), use_container_width=True, height=220)
 
-    st.subheader("Insight Brief")
-    st.markdown(brief("ADC conjugation method development & scale-up", start_dt, end_dt, df_sem, sig))
+        st.subheader("Insight Brief")
+        # Use your already-defined start_dt/end_dt (the ones you set before running PubMed)
+        st.markdown(brief("ADC conjugation method development & scale-up", start_dt, end_dt, df_sem, sig))
+    except Exception as e:
+        st.warning(f"Signals/brief skipped: {e}")
 
-    # Summaries
+    # --- Summaries ---
     st.subheader("Paper summaries (extractive)")
-    sums=[]
-    for _,r in df_sem.iterrows():
-        sums.append({
-            "Theme": r.get("Theme",""),
-            "Title": r["Title"],
-            "Summary (problem · method · result / novelty)": paper_summary(r["Title"], r.get("Abstract","")),
-            "Citations": r.get("Citations",""),
-            "Journal": r.get("Journal",""),
-            "PubDate": r.get("PubDate",""),
-            "PubMedLink": r.get("PubMedLink",""),
-            "DOILink": r.get("DOILink","")
-        })
-    df_sum = pd.DataFrame(sums)
-    st.dataframe(df_sum[["Theme","Title","Summary (problem · method · result / novelty)","Citations","Journal","PubDate","PubMedLink","DOILink"]],
-                 use_container_width=True, height=500)
+    try:
+        sums=[]
+        for _,r in df_sem.iterrows():
+            sums.append({
+                "Theme": r.get("Theme",""),
+                "Title": r["Title"],
+                "Summary (problem · method · result / novelty)": paper_summary(r["Title"], r.get("Abstract","")),
+                "Citations": r.get("Citations",""),
+                "Journal": r.get("Journal",""),
+                "PubDate": r.get("PubDate",""),
+                "PubMedLink": r.get("PubMedLink",""),
+                "DOILink": r.get("DOILink","")
+            })
+        df_sum = pd.DataFrame(sums)
+        st.dataframe(df_sum[["Theme","Title","Summary (problem · method · result / novelty)","Citations","Journal","PubDate","PubMedLink","DOILink"]],
+                     use_container_width=True, height=500)
 
-    # Downloads
-    st.subheader("Download")
-    st.download_button("Download Selected (CSV)", df_sem.to_csv(index=False).encode("utf-8"),
-                       file_name="selected_papers.csv", mime="text/csv")
-    st.download_button("Download Summaries (CSV)", df_sum.to_csv(index=False).encode("utf-8"),
-                       file_name="paper_summaries.csv", mime="text/csv")
+        st.subheader("Download")
+        st.download_button("Download Selected (CSV)", df_sem.to_csv(index=False).encode("utf-8"),
+                           file_name="selected_papers.csv", mime="text/csv")
+        st.download_button("Download Summaries (CSV)", df_sum.to_csv(index=False).encode("utf-8"),
+                           file_name="paper_summaries.csv", mime="text/csv")
+    except Exception as e:
+        st.warning(f"Summaries/download skipped: {e}")
+
+except Exception as e:
+    st.error(f"Post-filter pipeline error: {e}")
 
 st.markdown("---")
 st.caption("No heavy ML deps. TF-IDF + NumPy K-Means provide semantic ranking and themes suitable for method scouting.")
