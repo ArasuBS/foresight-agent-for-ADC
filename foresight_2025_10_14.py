@@ -318,7 +318,17 @@ def brief(domain, start_dt, end_dt, df, sig):
             f"**What is happening**\n- " + "\n- ".join(what) + "\n\n"
             f"**Why it matters**\n{why}\n\n"
             f"**What to do next**\n- " + "\n- ".join(nexts))
-
+def method_focused(title, abstract):
+    txt = (title or "") + " " + (abstract or "")
+    txt = txt.lower()
+    # must be ADC/bioconjugate AND mention at least one method/linker/reagent
+    adc_hit = any(k in txt for k in ["antibody-drug conjugate","antibody drug conjugate","bioconjugate","adc "])
+    tech_hit = any_kw(txt, METHODS + LINKERS + REAGENTS)
+    # exclude MRI unless clearly ADC
+    imaging = any(b in txt for b in IMAGING_BAD)
+    if imaging and not adc_hit:
+        return False
+    return adc_hit and tech_hit
 # -------------------------- Streamlit UI ----------------------
 st.set_page_config(page_title="Foresight – ADC Literature Intelligence", layout="wide")
 st.title("Foresight — ADC Literature Intelligence")
@@ -374,24 +384,30 @@ if run:
     meta_sorted = sorted(meta, key=lambda m: _parse_year(m.get("PubDate","")), reverse=True)
     recent_pmids_for_cites = set([m["PMID"] for m in meta_sorted[:RECENT_FOR_CITES]])
 
-    # Phase 2: filter + citations
+    # Phase 2: filter + citations (robust)
     rows=[]
     with st.spinner("Fetching citations & filtering…"):
-        for m in meta:
-            title = m.get("Title","")
-            abs_  = abstracts.get(m["PMID"], "")
-            if not is_bioconj_paper(title, abs_): continue
-            if not any_kw(title + " " + abs_, BIOCONJ_MUST): continue
+    kept = dropped = 0
+    for m in meta:
+        title = m.get("Title","")
+        abs_  = abstracts.get(m["PMID"], "")
 
-            want_cite = m["PMID"] in recent_pmids_for_cites
-            has_doi   = bool(m.get("DOI",""))
-            cites = crossref_cites(m["DOI"]) if (want_cite and has_doi) else None
+        if not method_focused(title, abs_):
+            dropped += 1
+            continue
 
-            rows.append({
-                **m,
-                "Abstract": abs_,
-                "Citations": cites if (cites is not None) else -1
-            })
+        kept += 1
+        want_cite = m["PMID"] in recent_pmids_for_cites
+        has_doi   = bool(m.get("DOI",""))
+        cites = crossref_cites(m["DOI"]) if (want_cite and has_doi) else None
+
+        rows.append({
+            **m,
+            "Abstract": abs_,
+            "Citations": cites if (cites is not None) else -1
+        })
+    st.info(f"Filter kept {kept} papers, dropped {dropped}.")
+
 
     df = pd.DataFrame(rows)
     if df.empty:
