@@ -351,6 +351,9 @@ with st.sidebar:
     final_k = st.slider("Final N after ranking & filters", 10, 80, 30, 5)
     debug = st.checkbox("Debug mode (show counts/logs)", value=False)
     run = st.button("Scan")
+if not run:
+    st.info("Set your query and press **Scan** to run.")
+    st.stop()
 
 if run:
     # Build date window
@@ -361,20 +364,29 @@ if run:
     with st.spinner("Searching PubMed…"):
         try:
             ids = pm_esearch(query, start_dt, end_dt, retmax=retmax)
-            if debug: st.info(f"PubMed IDs found: {len(ids)}")
             if not ids:
-                st.warning("No PubMed IDs found. Adjust query or widen timeline."); st.stop()
+                st.warning("No PubMed IDs found. Adjust query or widen timeline.")
+                st.stop()
 
             meta = pm_esummary(ids)
-            if debug: st.info(f"Summaries fetched: {len(meta)}")
             if not meta:
-                st.warning("No summaries returned by PubMed."); st.stop()
+                st.warning("No summaries returned by PubMed.")
+                st.stop()
 
             pmids = [m["PMID"] for m in meta]
             abstracts = pm_efetch_abs(pmids)
 
         except Exception as e:
-            st.error(f"PubMed error: {e}"); st.stop()
+            st.error(f"PubMed error: {e}")
+            st.stop()
+
+    # (still inside if run:)
+    # RECENT_FOR_CITES, recent_pmids_for_cites = ...
+    # Phase 2: filtering & citations (loop: for m in meta)
+    # Build df, semantic ranking, clustering
+    # Signals + brief + summaries
+    # Download buttons
+
 
     # Limit Crossref lookups to newest N
     RECENT_FOR_CITES = 250
