@@ -594,7 +594,7 @@ try:
             mime="text/csv"
         )
 
-    # =================== Full Report (HTML + ZIP) ===================
+# =================== Full Report (HTML + ZIP) ===================
 
 def _df_to_html(df, title):
     if df is None or df.empty:
