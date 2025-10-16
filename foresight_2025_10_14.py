@@ -744,3 +744,28 @@ except Exception as e:
 
 st.markdown("---")
 st.caption("No heavy ML deps. TF-IDF + NumPy K-Means provide semantic ranking and themes suitable for method scouting.")
+
+st.caption("No heavy ML deps. TF-IDF + NumPy K-Means provide semantic ranking and themes suitable for method scouting.")
+
+# --------------- Export: project bundle (ZIP) ----------------
+from io import BytesIO
+import zipfile
+from pathlib import Path
+
+buf = BytesIO()
+script_path = Path(__file__)
+with open(script_path, "r", encoding="utf-8") as f:
+    _source = f.read()
+
+with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    zf.writestr(script_path.name, _source)
+    req = Path("requirements.txt")
+    if req.exists():
+        zf.write(req.as_posix(), arcname="requirements.txt")
+
+st.download_button(
+    "Download project bundle (ZIP)",
+    data=buf.getvalue(),
+    file_name="foresight_adc_app.zip",
+    mime="application/zip"
+)
