@@ -360,10 +360,15 @@ def method_focused(title, abstract):
 
 # -------------------------- Streamlit UI ----------------------
 st.set_page_config(page_title="Foresight – ADC Literature Intelligence", layout="wide")
+
+# Persistent state flag (init once)
+if "run" not in st.session_state:
+    st.session_state.run = False
+
 st.title("Foresight — ADC Literature Intelligence")
 st.caption("Method focus · MRI disambiguation · TF-IDF semantic ranking · NumPy K-Means · Source links")
 
-# Sidebar controls
+# -------- Sidebar controls --------
 with st.sidebar:
     st.header("Scan settings")
     default_query = (
@@ -381,25 +386,16 @@ with st.sidebar:
     final_k = st.slider("Final N after ranking and filters", 10, 80, 30, 5)
     debug = st.checkbox("Debug mode (show counts and logs)", value=False)
 
-    # persist run state across reruns
-    if "run" not in st.session_state:
-        st.session_state.run = False
-
+    # Buttons control the persistent flag
     if st.button("Scan", key="scan_btn"):
         st.session_state.run = True
     if st.button("Reset", key="reset_btn"):
         st.session_state.run = False
-
-# --- Single gate using session_state ---
-if not st.session_state.run:
-    st.info("Set your query and press **Scan** to run.")
-    st.stop()
-
-
-# Single, non-duplicated gate
-if not run:
-    st.info("Set your query and press **Scan** to run.")
-    st.stop()
+        
+    # --- Single gate using session_state ---
+    if not st.session_state.run:
+        st.info("Set your query and press **Scan** to run.")
+        st.stop()
 
 # -------------------------- Pipeline starts here --------------------------
 # Build date window
