@@ -2,7 +2,8 @@
 # PubMed + Crossref · MRI disambiguation · TF-IDF semantic ranking (no sklearn)
 # NumPy K-Means clustering · Signals · Extractive summaries · Source links
 
-import os, re, time, random, string, math, requests
+import os, re, time, random, string, math, requests, zipfile
+from io import BytesIO
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -97,7 +98,7 @@ def word_boundary_count(text, vocab):
         pattern = (
             r'(?<![a-z0-9])' +
             re.escape(t)
-              .replace(r'\-', r'[- ]?')   # hyphen or space tolerant
+              .replace(r'\-', r'[- ]?')   # hyphen/space tolerant
               .replace('beta', r'(beta|β)') +
             r's?(?![a-z0-9])'
         )
@@ -385,17 +386,15 @@ with st.sidebar:
     topn_citations = st.slider("Top N by citations (pre-filter)", 10, 150, 60, 5)
     final_k = st.slider("Final N after ranking and filters", 10, 80, 30, 5)
     debug = st.checkbox("Debug mode (show counts and logs)", value=False)
-
-    # Buttons control the persistent flag
     if st.button("Scan", key="scan_btn"):
         st.session_state.run = True
     if st.button("Reset", key="reset_btn"):
         st.session_state.run = False
-        
-    # --- Single gate using session_state ---
-    if not st.session_state.run:
-        st.info("Set your query and press **Scan** to run.")
-        st.stop()
+
+# Single gate outside the sidebar
+if not st.session_state.run:
+    st.info("Set your query and press **Scan** to run.")
+    st.stop()
 
 # -------------------------- Pipeline starts here --------------------------
 # Build date window
@@ -456,7 +455,7 @@ with st.spinner("Fetching citations and filtering…"):
     if debug:
         st.write("Sample kept record:", rows[0] if rows else "None")
 
-# Build DataFrame and checkpoint view
+# Build DataFrame and downstream pipeline
 try:
     df = pd.DataFrame(rows)
     if df.empty:
@@ -509,8 +508,7 @@ try:
     st.subheader("Themes (clusters)")
     try:
         if "SemanticScore" in df_sem.columns and len(df_sem) >= 2 and any(t.strip() for t in texts):
-            # Build X aligned to df_sem order
-            X = M[order][keep_idx][:len(df_sem)]
+            X = M[order][keep_idx][:len(df_sem)]  # aligned to df_sem order
             k = choose_k(len(df_sem))
             labels, _ = kmeans_numpy(X, k=k, iters=30, seed=42)
             df_sem["ThemeID"] = labels
@@ -557,8 +555,11 @@ try:
         st.markdown(brief("ADC conjugation method development and scale-up", start_dt, end_dt, df_sem, sig))
     except Exception as e:
         st.warning(f"Signals or brief skipped: {e}")
+        # ensure sig exists for the report
+        if 'sig' not in locals():
+            sig = {"methods":[],"linkers":[],"reagents":[],"payloads":[],"targets":[],"clinical":[],"ai":[]}
 
-    # Summaries and downloads
+    # Summaries and CSV downloads
     st.subheader("Paper summaries (extractive)")
     try:
         sums = []
@@ -593,156 +594,150 @@ try:
             file_name="paper_summaries.csv",
             mime="text/csv"
         )
+    except Exception as e:
+        st.warning(f"Summaries or CSV downloads skipped: {e}")
+        if 'df_sum' not in locals():
+            df_sum = pd.DataFrame(columns=["Theme","Title","Summary (problem · method · result / novelty)","Citations","Journal","PubDate","PubMedLink","DOILink"])
 
-# =================== Full Report (HTML + ZIP) ===================
+    # =================== Full Report (HTML + ZIP) ===================
+    def _df_to_html(df_in, title):
+        if df_in is None or df_in.empty:
+            return f"<h3>{title}</h3><p><em>No data</em></p>"
+        return f"<h3>{title}</h3>" + df_in.to_html(index=False, escape=False)
 
-def _df_to_html(df, title):
-    if df is None or df.empty:
-        return f"<h3>{title}</h3><p><em>No data</em></p>"
-    return f"<h3>{title}</h3>" + df.to_html(index=False, escape=False)
+    def _signals_tables_html(sig_dict):
+        def _dictdf(name, pairs):
+            return pd.DataFrame(pairs, columns=[name, "count"]) if pairs else pd.DataFrame(columns=[name, "count"])
+        parts = []
+        parts.append(_df_to_html(_dictdf("method", sig_dict.get("methods", [])), "Signals — Methods"))
+        parts.append(_df_to_html(_dictdf("linker", sig_dict.get("linkers", [])), "Signals — Linkers"))
+        parts.append(_df_to_html(_dictdf("reagent", sig_dict.get("reagents", [])), "Signals — Reagents"))
+        parts.append(_df_to_html(_dictdf("payload", sig_dict.get("payloads", [])), "Signals — Payloads"))
+        parts.append(_df_to_html(_dictdf("target", sig_dict.get("targets", [])), "Signals — Targets"))
+        parts.append(_df_to_html(_dictdf("clinical", sig_dict.get("clinical", [])), "Signals — Clinical"))
+        parts.append(_df_to_html(_dictdf("ai", sig_dict.get("ai", [])), "Signals — AI"))
+        return "\n".join(parts)
 
-def _signals_tables_html(sig):
-    # Build DataFrames from signals dict (reuse dictdf from above if available)
-    def _dictdf(name, pairs):
-        return pd.DataFrame(pairs, columns=[name, "count"]) if pairs else pd.DataFrame(columns=[name, "count"])
-    parts = []
-    parts.append(_df_to_html(_dictdf("method", sig.get("methods", [])), "Signals — Methods"))
-    parts.append(_df_to_html(_dictdf("linker", sig.get("linkers", [])), "Signals — Linkers"))
-    parts.append(_df_to_html(_dictdf("reagent", sig.get("reagents", [])), "Signals — Reagents"))
-    parts.append(_df_to_html(_dictdf("payload", sig.get("payloads", [])), "Signals — Payloads"))
-    parts.append(_df_to_html(_dictdf("target", sig.get("targets", [])), "Signals — Targets"))
-    parts.append(_df_to_html(_dictdf("clinical", sig.get("clinical", [])), "Signals — Clinical"))
-    parts.append(_df_to_html(_dictdf("ai", sig.get("ai", [])), "Signals — AI"))
-    return "\n".join(parts)
+    def _themes_table(df_sem_in):
+        if "Theme" not in df_sem_in.columns:
+            return pd.DataFrame(columns=["Theme","Count"])
+        ct = df_sem_in.groupby("Theme", dropna=False).size().reset_index(name="Count").sort_values("Count", ascending=False)
+        return ct
 
-def _themes_table(df_sem):
-    if "Theme" not in df_sem.columns:
-        return pd.DataFrame(columns=["Theme","Count"])
-    ct = df_sem.groupby("Theme", dropna=False).size().reset_index(name="Count").sort_values("Count", ascending=False)
-    return ct
+    def build_full_report_html(app_title, query_str, start_dt_in, end_dt_in, df_sem_in, df_sum_in, sig_in):
+        window = f"{start_dt_in.strftime('%d %b %Y')} - {end_dt_in.strftime('%d %b %Y')}"
+        themes_df = _themes_table(df_sem_in)
 
-def build_full_report_html(app_title, query, start_dt, end_dt, df_sem, df_sum, sig):
-    window = f"{start_dt.strftime('%d %b %Y')} - {end_dt.strftime('%d %b %Y')}"
-    themes_df = _themes_table(df_sem)
+        style = """
+        <style>
+          body { font-family: Arial, Helvetica, sans-serif; margin: 24px; }
+          h1 { font-size: 24px; margin-bottom: 4px; }
+          h2 { font-size: 20px; margin-top: 28px; }
+          h3 { font-size: 16px; margin-top: 18px; }
+          .meta { color: #333; margin-bottom: 16px; }
+          table { border-collapse: collapse; width: 100%; margin: 10px 0 20px 0; }
+          th, td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
+          th { background: #f6f6f6; }
+          .note { font-size: 12px; color: #666; }
+          .section { margin-top: 24px; }
+          .code { font-family: Consolas, Menlo, monospace; background: #f8f8f8; padding: 2px 6px; border-radius: 4px; }
+        </style>
+        """
 
-    style = """
-    <style>
-      body { font-family: Arial, Helvetica, sans-serif; margin: 24px; }
-      h1 { font-size: 24px; margin-bottom: 4px; }
-      h2 { font-size: 20px; margin-top: 28px; }
-      h3 { font-size: 16px; margin-top: 18px; }
-      .meta { color: #333; margin-bottom: 16px; }
-      table { border-collapse: collapse; width: 100%; margin: 10px 0 20px 0; }
-      th, td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
-      th { background: #f6f6f6; }
-      .note { font-size: 12px; color: #666; }
-      .section { margin-top: 24px; }
-      .code { font-family: Consolas, Menlo, monospace; background: #f8f8f8; padding: 2px 6px; border-radius: 4px; }
-    </style>
-    """
+        brief_md = brief("ADC conjugation method development and scale-up", start_dt_in, end_dt_in, df_sem_in, sig_in)
+        brief_html = "<br>".join(brief_md.splitlines())
 
-    # Insight Brief text (reusing your brief() function output)
-    brief_md = brief("ADC conjugation method development and scale-up", start_dt, end_dt, df_sem, sig)
-    # Convert Markdown newlines to HTML line breaks for embedding (simple approach)
-    brief_html = "<br>".join(brief_md.splitlines())
+        html = f"""
+        <html>
+        <head><meta charset="utf-8">{style}<title>{app_title}</title></head>
+        <body>
+          <h1>{app_title}</h1>
+          <div class="meta">
+            <div><b>Window:</b> {window}</div>
+            <div><b>Query:</b> <span class="code">{query_str}</span></div>
+            <div><b>Papers analyzed:</b> {len(df_sem_in)}</div>
+            <div class="note">Generated by Foresight Streamlit app</div>
+          </div>
 
-    html = f"""
-    <html>
-    <head><meta charset="utf-8">{style}<title>{app_title}</title></head>
-    <body>
-      <h1>{app_title}</h1>
-      <div class="meta">
-        <div><b>Window:</b> {window}</div>
-        <div><b>Query:</b> <span class="code">{query}</span></div>
-        <div><b>Papers analyzed:</b> {len(df_sem)}</div>
-        <div class="note">Generated by Foresight Streamlit app</div>
-      </div>
+          <div class="section">
+            <h2>Insight Brief</h2>
+            <div>{brief_html}</div>
+          </div>
 
-      <div class="section">
-        <h2>Insight Brief</h2>
-        <div>{brief_html}</div>
-      </div>
+          <div class="section">
+            <h2>Signals Snapshot</h2>
+            {_signals_tables_html(sig_in)}
+          </div>
 
-      <div class="section">
-        <h2>Signals Snapshot</h2>
-        {_signals_tables_html(sig)}
-      </div>
+          <div class="section">
+            <h2>Themes (clusters)</h2>
+            {_df_to_html(themes_df, "Theme counts")}
+          </div>
 
-      <div class="section">
-        <h2>Themes (clusters)</h2>
-        {_df_to_html(themes_df, "Theme counts")}
-      </div>
+          <div class="section">
+            <h2>Selected papers (semantically ranked)</h2>
+            {_df_to_html(df_sem_in[["Title","Journal","PubDate","Authors","Citations","PMID","DOI","PubMedLink"]], "Selected papers")}
+          </div>
 
-      <div class="section">
-        <h2>Selected papers (semantically ranked)</h2>
-        {_df_to_html(df_sem[["Title","Journal","PubDate","Authors","Citations","PMID","DOI","PubMedLink"]], "Selected papers")}
-      </div>
+          <div class="section">
+            <h2>Paper summaries (extractive)</h2>
+            {_df_to_html(df_sum_in[["Theme","Title","Summary (problem · method · result / novelty)","Citations","Journal","PubDate","PubMedLink","DOILink"]], "Summaries")}
+          </div>
+        </body>
+        </html>
+        """
+        return html
 
-      <div class="section">
-        <h2>Paper summaries (extractive)</h2>
-        {_df_to_html(df_sum[["Theme","Title","Summary (problem · method · result / novelty)","Citations","Journal","PubDate","PubMedLink","DOILink"]], "Summaries")}
-      </div>
-    </body>
-    </html>
-    """
-    return html
-
-# Build HTML
-report_html = build_full_report_html(
-    app_title="Foresight — ADC Literature Intelligence",
-    query=query,
-    start_dt=start_dt,
-    end_dt=end_dt,
-    df_sem=df_sem.copy(),
-    df_sum=df_sum.copy(),
-    sig=sig
-)
-
-# Download button: HTML
-st.download_button(
-    "Download Full Report (HTML)",
-    data=report_html.encode("utf-8"),
-    file_name="foresight_adc_full_report.html",
-    mime="text/html"
-)
-
-# Optional: ZIP bundle (HTML + CSVs)
-try:
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("foresight_adc_full_report.html", report_html)
-        # Include CSVs for convenience
-        zf.writestr("selected_papers.csv", df_sem.to_csv(index=False))
-        zf.writestr("paper_summaries.csv", df_sum.to_csv(index=False))
-        # Signals and themes CSVs
-        themes_csv = _themes_table(df_sem).to_csv(index=False)
-        zf.writestr("themes.csv", themes_csv)
-
-        # Break out signals into CSVs
-        def _pairs_to_csv(pairs, header):
-            dfp = pd.DataFrame(pairs, columns=[header, "count"]) if pairs else pd.DataFrame(columns=[header, "count"])
-            return dfp.to_csv(index=False)
-
-        zf.writestr("signals_methods.csv", _pairs_to_csv(sig.get("methods", []), "method"))
-        zf.writestr("signals_linkers.csv", _pairs_to_csv(sig.get("linkers", []), "linker"))
-        zf.writestr("signals_reagents.csv", _pairs_to_csv(sig.get("reagents", []), "reagent"))
-        zf.writestr("signals_payloads.csv", _pairs_to_csv(sig.get("payloads", []), "payload"))
-        zf.writestr("signals_targets.csv", _pairs_to_csv(sig.get("targets", []), "target"))
-        zf.writestr("signals_clinical.csv", _pairs_to_csv(sig.get("clinical", []), "clinical"))
-        zf.writestr("signals_ai.csv", _pairs_to_csv(sig.get("ai", []), "ai"))
-
-    st.download_button(
-        "Download Bundle (HTML + CSVs).zip",
-        data=buf.getvalue(),
-        file_name="foresight_adc_bundle.zip",
-        mime="application/zip"
+    # Build HTML report
+    report_html = build_full_report_html(
+        app_title="Foresight — ADC Literature Intelligence",
+        query_str=query,
+        start_dt_in=start_dt,
+        end_dt_in=end_dt,
+        df_sem_in=df_sem.copy(),
+        df_sum_in=df_sum.copy(),
+        sig_in=sig
     )
-except Exception as e:
-    st.warning(f"ZIP bundle creation skipped: {e}")
-# =================== End Full Report (HTML + ZIP) ===================
 
-except Exception as e:
-        st.warning(f"Summaries or download skipped: {e}")
+    # Download button: HTML
+    st.download_button(
+        "Download Full Report (HTML)",
+        data=report_html.encode("utf-8"),
+        file_name="foresight_adc_full_report.html",
+        mime="text/html"
+    )
+
+    # Optional: ZIP bundle (HTML + CSVs)
+    try:
+        buf = BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("foresight_adc_full_report.html", report_html)
+            zf.writestr("selected_papers.csv", df_sem.to_csv(index=False))
+            zf.writestr("paper_summaries.csv", df_sum.to_csv(index=False))
+            themes_csv = _themes_table(df_sem).to_csv(index=False)
+            zf.writestr("themes.csv", themes_csv)
+
+            def _pairs_to_csv(pairs, header):
+                dfp = pd.DataFrame(pairs, columns=[header, "count"]) if pairs else pd.DataFrame(columns=[header, "count"])
+                return dfp.to_csv(index=False)
+
+            zf.writestr("signals_methods.csv", _pairs_to_csv(sig.get("methods", []), "method"))
+            zf.writestr("signals_linkers.csv", _pairs_to_csv(sig.get("linkers", []), "linker"))
+            zf.writestr("signals_reagents.csv", _pairs_to_csv(sig.get("reagents", []), "reagent"))
+            zf.writestr("signals_payloads.csv", _pairs_to_csv(sig.get("payloads", []), "payload"))
+            zf.writestr("signals_targets.csv", _pairs_to_csv(sig.get("targets", []), "target"))
+            zf.writestr("signals_clinical.csv", _pairs_to_csv(sig.get("clinical", []), "clinical"))
+            zf.writestr("signals_ai.csv", _pairs_to_csv(sig.get("ai", []), "ai"))
+
+        st.download_button(
+            "Download Bundle (HTML + CSVs).zip",
+            data=buf.getvalue(),
+            file_name="foresight_adc_bundle.zip",
+            mime="application/zip"
+        )
+    except Exception as e:
+        st.warning(f"ZIP bundle creation skipped: {e}")
+    # =================== End Full Report (HTML + ZIP) ===================
 
 except Exception as e:
     st.error(f"Post-filter pipeline error: {e}")
